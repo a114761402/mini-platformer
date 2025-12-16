@@ -7,16 +7,14 @@
   <style>
     html, body { height: 100%; margin: 0; overflow: hidden; background: #000; }
     canvas {
-      position: fixed;
-      inset: 0;
-      width: 100vw;
-      height: 100vh;
+      position: fixed; inset: 0;
+      width: 100vw; height: 100vh;
       display: block;
-      touch-action: none; /* prevent scroll/zoom while playing */
+      touch-action: none;
       outline: none;
     }
 
-    /* Minimal overlay (only for first tap, it covers the whole canvas) */
+    /* Full-canvas start overlay */
     #overlay {
       position: fixed; inset: 0;
       display:flex; align-items:center; justify-content:center;
@@ -46,7 +44,7 @@
     }
     button.secondary { background: rgba(255,255,255,.18); color:#fff; border:1px solid rgba(255,255,255,.25); }
 
-    /* Touch controls (shown on mobile / touch devices) */
+    /* Touch controls */
     #controls {
       position: fixed;
       left: 0; right: 0; bottom: 0;
@@ -73,8 +71,16 @@
     }
     .btn:active { transform: translateY(1px); }
 
+    /* Show on touch devices */
     @media (pointer:coarse) {
       #controls { display:flex; }
+    }
+
+    /* Landscape phone: reduce button footprint so you still see play area */
+    @media (pointer:coarse) and (orientation: landscape) {
+      #controls { padding: 6px 10px calc(10px + env(safe-area-inset-bottom)); }
+      .btn { width: 54px; height: 54px; border-radius: 16px; font-size: 16px; }
+      .pad { gap: 8px; }
     }
   </style>
 </head>
@@ -83,15 +89,11 @@
 
   <div id="overlay">
     <div class="card">
-      <h1>Mini Platformer — Random Puzzle</h1>
+      <h1>Mini Platformer</h1>
       <p><b>Tap / click once</b> to activate controls.</p>
       <p>
-        Move: <b>←/→</b> or <b>A/D</b> · Jump: <b>Space</b> (or <b>↑/W</b>) · Restart/New: <b>Enter</b><br/>
-        Mobile: use buttons, including <b>↻</b> to generate a new puzzle.
-      </p>
-      <p>
-        This generator makes a new layout each run while ensuring there is always a reachable “critical path”
-        from start to the flag (then it decorates with optional coins/blocks/enemies).
+        Move: <b>←/→</b> or <b>A/D</b> · Jump: <b>Space</b> (or <b>↑/W</b>) · New puzzle: <b>Enter</b><br/>
+        Mobile: use buttons (◀ ▶ ⤒ ↻). Works in <b>portrait + landscape</b>.
       </p>
       <div class="row">
         <button id="startBtn">Start</button>
@@ -100,7 +102,6 @@
     </div>
   </div>
 
-  <!-- Touch controls -->
   <div id="controls">
     <div class="pad">
       <div class="btn" id="leftBtn">◀</div>
@@ -114,16 +115,6 @@
 
 <script>
 (() => {
-  // ============================================================
-  //  Notes on solvable procedural generation
-  //  - A common approach is to first build a guaranteed playable “critical path”
-  //    (e.g., a chain of reachable platforms), then add optional decorations
-  //    like coins/enemies/blocks without breaking playability.
-  //  - Another common technique is to compute jump reachability using physics
-  //    (time-of-flight / max height / horizontal range) and constrain platform
-  //    placement accordingly.
-  // ============================================================
-
   // ---------- Helpers ----------
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const rectsOverlap = (a, b) => (
@@ -133,7 +124,7 @@
     a.y + a.h > b.y
   );
 
-  // Deterministic RNG per run (Mulberry32)
+  // RNG (Mulberry32)
   function makeRng(seed) {
     let t = seed >>> 0;
     return function() {
@@ -144,17 +135,15 @@
       return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
     };
   }
-
   function newSeed() {
     const u = new Uint32Array(1);
     crypto.getRandomValues(u);
     return u[0] >>> 0;
   }
-
   const randInt = (rng, a, b) => (a + Math.floor(rng() * (b - a + 1)));
   const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
 
-  // ---------- Canvas setup (full-screen; supports portrait) ----------
+  // ---------- Canvas (full screen; portrait + landscape) ----------
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d", { alpha: false });
   const overlay = document.getElementById("overlay");
@@ -162,6 +151,22 @@
   const newBtn = document.getElementById("newBtn");
 
   const dpr = () => Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+
+  const state = {
+    runIndex: 1,
+    seed: 0,
+    score: 0,
+    status: "playing", // playing | win | lose
+    message: "",
+    view: { x: 0, y: 0, w: 360, h: 640 },
+    world: { wTiles: 140, hTiles: 18, groundY: 16 },
+    solids: [],
+    coins: [],
+    enemies: [],
+    flag: null,
+    player: null,
+    popups: [],
+  };
 
   function resize() {
     const w = Math.max(1, window.innerWidth);
@@ -171,8 +176,7 @@
     canvas.height = Math.floor(h * r);
     canvas.style.width = w + "px";
     canvas.style.height = h + "px";
-    ctx.setTransform(r, 0, 0, r, 0, 0); // draw in CSS pixels
-
+    ctx.setTransform(r, 0, 0, r, 0, 0);
     state.view.w = w;
     state.view.h = h;
   }
@@ -198,14 +202,12 @@
     const k = e.key.toLowerCase();
     if (k === "arrowleft" || k === "a") input.left = down;
     if (k === "arrowright" || k === "d") input.right = down;
-
     if (k === "arrowup" || k === "w" || k === " " || k === "spacebar") {
       input.jumpHeld = down;
       if (down) input.jumpPressed = true;
     }
     if (k === "enter" && down) resetRun(true);
   }
-
   window.addEventListener("keydown", (e) => onKey(e, true), { passive:false });
   window.addEventListener("keyup", (e) => onKey(e, false), { passive:false });
 
@@ -222,85 +224,45 @@
   hookHold(document.getElementById("rightBtn"), "right");
 
   const jumpBtn = document.getElementById("jumpBtn");
-  jumpBtn.addEventListener("pointerdown", (e) => {
-    e.preventDefault(); activateControls();
-    input.jumpHeld = true; input.jumpPressed = true;
-  });
+  jumpBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); activateControls(); input.jumpHeld = true; input.jumpPressed = true; });
   const endJump = (e) => { e.preventDefault(); input.jumpHeld = false; };
   jumpBtn.addEventListener("pointerup", endJump);
   jumpBtn.addEventListener("pointercancel", endJump);
   jumpBtn.addEventListener("pointerleave", endJump);
 
   document.getElementById("renewBtn").addEventListener("pointerdown", (e) => {
-    e.preventDefault(); activateControls();
-    resetRun(true);
+    e.preventDefault(); activateControls(); resetRun(true);
   });
 
   canvas.addEventListener("pointerdown", activateControls);
 
   // ---------- Game constants ----------
   const TILE = 32;
-
   const GRAVITY = 2400;
   const BASE_MOVE_SPEED = 320;
   const JUMP_VELOCITY = 780;
 
-  // Physics-derived reachability helpers (jump constraints)
-  // y(t) = -V*t + 0.5*G*t^2  (up is negative; down positive)
+  // Jump reach (physics-based)
   function jumpTimeToDeltaY(dyPx) {
     const V = JUMP_VELOCITY;
     const G = GRAVITY;
-    if (dyPx >= 0) {
-      // landing lower or same: t = (V + sqrt(V^2 + 2G*dy)) / G
-      return (V + Math.sqrt(V*V + 2*G*dyPx)) / G;
-    } else {
-      // landing higher by h = -dy: need V^2 >= 2G*h
-      const h = -dyPx;
-      const disc = V*V - 2*G*h;
-      if (disc <= 0) return null;
-      return (V - Math.sqrt(disc)) / G;
-    }
+    if (dyPx >= 0) return (V + Math.sqrt(V*V + 2*G*dyPx)) / G;
+    const h = -dyPx;
+    const disc = V*V - 2*G*h;
+    if (disc <= 0) return null;
+    return (V - Math.sqrt(disc)) / G;
   }
-
   function maxHorizontalReach(dyPx, moveSpeed) {
     const t = jumpTimeToDeltaY(dyPx);
     if (t == null) return 0;
     return moveSpeed * t;
   }
-
   const MAX_JUMP_HEIGHT_PX = (JUMP_VELOCITY * JUMP_VELOCITY) / (2 * GRAVITY);
 
-  // ---------- Game state ----------
-  const state = {
-    runIndex: 1,
-    seed: 0,
-    score: 0,
+  function addScore(points) { state.score += points; }
+  function addPopup(x, y, text, ttl=0.9) { state.popups.push({ x, y, text, ttl }); }
 
-    status: "playing", // playing | win | lose
-    message: "",
-
-    view: { x: 0, y: 0, w: 360, h: 640 }, // updated in resize()
-
-    world: { wTiles: 140, hTiles: 18, groundY: 16 },
-
-    solids: [],   // {x,y,w,h,type:'ground'|'qblock', used?:bool, bump?:number, reward?:string}
-    coins: [],    // {x,y,w,h,taken, ttl?, isBurst?}
-    enemies: [],  // {x,y,w,h,vx,vy,alive}
-    flag: null,   // {x,y,w,h}
-    player: null, // {x,y,w,h,vx,vy,onGround,face, invulnT, speedT, reverseT}
-
-    popups: [],   // {x,y,text,ttl}
-  };
-
-  function addScore(points) {
-    state.score += points;
-  }
-
-  function addPopup(x, y, text, ttl=0.9) {
-    state.popups.push({ x, y, text, ttl });
-  }
-
-  // ---------- Collision resolution (axis separated) ----------
+  // ---------- Collision ----------
   function resolveX(body) {
     for (const s of state.solids) {
       if (!rectsOverlap(body, s)) continue;
@@ -311,50 +273,39 @@
   }
 
   function resolveY(body) {
-    let hitCeilingBlock = null;
-
+    let hitQ = null;
     for (const s of state.solids) {
       if (!rectsOverlap(body, s)) continue;
 
       if (body.vy > 0) {
-        // falling -> land on top
         body.y = s.y - body.h;
         body.vy = 0;
         body.onGround = true;
       } else if (body.vy < 0) {
-        // rising -> hit ceiling
         body.y = s.y + s.h;
         body.vy = 0;
-
-        if (s.type === "qblock") hitCeilingBlock = s;
+        if (s.type === "qblock") hitQ = s;
       }
     }
-
-    if (hitCeilingBlock) onHitQBlock(hitCeilingBlock);
+    if (hitQ) onHitQBlock(hitQ);
   }
 
   // ---------- Funny rewards for '?' blocks ----------
-  // Requirement #6: different things to make it funny.
   const REWARDS = [
-    { id: "coins",   w: 0.40 },
-    { id: "superjump", w: 0.18 },
-    { id: "speed",   w: 0.18 },
-    { id: "shield",  w: 0.14 },
+    { id: "coins",      w: 0.40 },
+    { id: "superjump",  w: 0.18 },
+    { id: "speed",      w: 0.18 },
+    { id: "shield",     w: 0.14 },
     { id: "oops_enemy", w: 0.10 },
   ];
-
   function weightedPick(rng, items) {
     const total = items.reduce((s,it)=>s+it.w, 0);
     let r = rng() * total;
-    for (const it of items) {
-      r -= it.w;
-      if (r <= 0) return it.id;
-    }
+    for (const it of items) { r -= it.w; if (r <= 0) return it.id; }
     return items[items.length-1].id;
   }
 
   function onHitQBlock(block) {
-    // Only first hit counts
     if (block.used) return;
     block.used = true;
     block.bump = 0.14;
@@ -366,52 +317,40 @@
     const cx = block.x + block.w/2;
     const cy = block.y;
 
-    // Always give some base points
     addScore(5);
-    addPopup(cx, cy - 10, "+5");
+    addPopup(cx, cy - 10, "+5", 0.8);
 
     const p = state.player;
 
     if (reward === "coins") {
-      addPopup(cx, cy - 28, "COINS!");
-      // Spawn 3 coins above (collectable) + instant bonus
+      addPopup(cx, cy - 28, "COINS!", 0.9);
       for (let i = 0; i < 3; i++) {
         state.coins.push({ x: block.x + 8, y: block.y - 18 - i*18, w: 16, h: 16, taken:false, ttl: 0.9, isBurst:true });
       }
       addScore(3);
-    }
-    else if (reward === "superjump") {
-      addPopup(cx, cy - 28, "BOING!");
-      // Give an immediate boosted upward velocity (funny bounce)
+    } else if (reward === "superjump") {
+      addPopup(cx, cy - 28, "BOING!", 0.9);
       p.vy = -JUMP_VELOCITY * 1.35;
       addScore(2);
-    }
-    else if (reward === "speed") {
-      addPopup(cx, cy - 28, "SPEED!");
+    } else if (reward === "speed") {
+      addPopup(cx, cy - 28, "SPEED!", 0.9);
       p.speedT = 4.5;
       addScore(2);
-    }
-    else if (reward === "shield") {
-      addPopup(cx, cy - 28, "SHIELD!");
+    } else if (reward === "shield") {
+      addPopup(cx, cy - 28, "SHIELD!", 0.9);
       p.invulnT = 4.5;
       addScore(2);
-    }
-    else if (reward === "oops_enemy") {
-      addPopup(cx, cy - 28, "UH-OH 😈");
-      // Spawn a small enemy on top of the block (but still avoid instant unfair hits)
-      const ex = block.x + 2;
-      const ey = block.y - 30;
-      state.enemies.push({ x: ex, y: ey, w: 28, h: 28, vx: (rng()<0.5?-1:1) * 90, vy: 0, alive: true });
-      // consolation score
+    } else if (reward === "oops_enemy") {
+      addPopup(cx, cy - 28, "UH-OH 😈", 0.9);
+      state.enemies.push({ x: block.x + 2, y: block.y - 30, w: 28, h: 28, vx: (rng()<0.5?-1:1) * 90, vy: 0, alive: true });
       addScore(1);
     }
   }
 
-  // ---------- Procedural level generation (solvable by construction) ----------
+  // ---------- Solvable generation (critical path first) ----------
   function generateSolvableLevel(seed, difficulty) {
     const rng = makeRng(seed);
 
-    // World size & ground
     const wTiles = clamp(95 + difficulty * 18, 95, 160);
     const hTiles = 18;
     const groundY = 16;
@@ -425,14 +364,10 @@
       solids.push({ x: tx*TILE, y: ty*TILE, w: TILE, h: TILE, type, ...extra });
     };
 
-    // Base ground with pits (not affecting the critical path platforms)
+    // Ground with pits
     const pitCount = clamp(6 + difficulty * 4, 6, 16);
     const pits = [];
-    for (let i = 0; i < pitCount; i++) {
-      const pw = randInt(rng, 2, 4);
-      const px = randInt(rng, 10, wTiles - 15);
-      pits.push({ x: px, w: pw });
-    }
+    for (let i = 0; i < pitCount; i++) pits.push({ x: randInt(rng, 10, wTiles - 15), w: randInt(rng, 2, 4) });
     pits.sort((a,b)=>a.x-b.x);
     const pitsMerged = [];
     for (const p of pits) {
@@ -447,35 +382,25 @@
       if (!isPit(x)) solidAt(x, groundY, "ground");
     }
 
-    // ---- Critical path platforms (guaranteed reachable)
-    // We constrain placement using jump physics:
-    // choose next segment origin so that its landing surface is within horizontal reach for its deltaY.
+    // Critical path platforms (physics constrained)
     const segments = [];
-    let x = 2;
-    let y = groundY - 1;
-
+    let x = 2, y = groundY - 1;
     const endTarget = wTiles - 8;
 
-    // We'll use a conservative speed during jump (some players won't be perfectly optimal)
     const SAFE_SPEED = BASE_MOVE_SPEED * 0.90;
-
-    // Max upward tiles we can reach
-    const maxUpTiles = Math.floor((MAX_JUMP_HEIGHT_PX * 0.85) / TILE); // margin
+    const maxUpTiles = Math.floor((MAX_JUMP_HEIGHT_PX * 0.85) / TILE);
 
     while (x < endTarget) {
       const len = randInt(rng, 5, 9);
       segments.push({ x, y, len });
 
-      // Proposed next y within reachable vertical range
-      const dyTiles = randInt(rng, -Math.min(maxUpTiles, 4), 4); // limit up steps a bit
+      const dyTiles = randInt(rng, -Math.min(maxUpTiles, 4), 4);
       const nextY = clamp(y + dyTiles, groundY - 10, groundY - 1);
 
-      // Compute horizontal reach for that deltaY
       const dyPx = (nextY - y) * TILE;
-      const maxDxPx = maxHorizontalReach(dyPx, SAFE_SPEED) * 0.88; // extra safety margin
+      const maxDxPx = maxHorizontalReach(dyPx, SAFE_SPEED) * 0.88;
       const maxDxTiles = Math.max(3, Math.floor(maxDxPx / TILE));
 
-      // Choose a gap within reach
       const gap = randInt(rng, 2, clamp(maxDxTiles - len, 2, 10));
       const nextX = x + len + gap;
 
@@ -485,25 +410,20 @@
       if (x >= endTarget - 12) break;
     }
 
-    if (segments.length === 0) segments.push({ x: 2, y: groundY-1, len: 8 });
+    if (!segments.length) segments.push({ x: 2, y: groundY-1, len: 8 });
     const last = segments[segments.length-1];
     if (last.x + last.len < endTarget - 2) {
       segments.push({ x: endTarget - 8, y: clamp(last.y + randInt(rng, -1, 1), groundY-10, groundY-1), len: 10 });
     }
 
-    // Build platform solids
-    for (const seg of segments) {
-      for (let i = 0; i < seg.len; i++) solidAt(seg.x + i, seg.y, "ground");
-    }
+    for (const seg of segments) for (let i = 0; i < seg.len; i++) solidAt(seg.x + i, seg.y, "ground");
 
-    // Start & flag on the critical path
     const start = { x: 2*TILE, y: (groundY - 1)*TILE };
     const flagSeg = segments[segments.length-1];
     const flag = { x: (flagSeg.x + flagSeg.len - 1)*TILE, y: (flagSeg.y - 1)*TILE, w: TILE, h: TILE };
     solidAt(flagSeg.x + flagSeg.len - 1, flagSeg.y, "ground");
 
-    // ---- Decorations that don't break solvability ----
-    // Coins along the critical path
+    // Coins (optional)
     for (const seg of segments) {
       if (rng() < 0.65) {
         const count = randInt(rng, 1, 3);
@@ -515,27 +435,21 @@
       }
     }
 
-    // '?' blocks: place them so they are reachable to hit (within jump height),
-    // but NOT required for the main path.
+    // '?' blocks (reachable but not required)
     const qCount = clamp(10 + difficulty * 6, 10, 28);
-    const minAbove = 2; // at least 2 tiles above platform to allow hitting from below sometimes
-    const maxAbove = clamp(maxUpTiles, 2, 4); // keep within reachable height
-
+    const minAbove = 2;
+    const maxAbove = clamp(maxUpTiles, 2, 4);
     for (let i = 0; i < qCount; i++) {
       const seg = pick(rng, segments);
       const tx = seg.x + randInt(rng, 0, seg.len - 1);
       const above = randInt(rng, minAbove, maxAbove);
       const ty = seg.y - above;
       if (ty < 2) continue;
-
-      // Avoid placing blocks directly above where the player must land (reduce head-bonk frustration):
-      // keep a little vertical clearance by not stacking blocks too low above long corridors.
       if (above === 2 && rng() < 0.5) continue;
-
       solidAt(tx, ty, "qblock", { used:false, bump:0, reward:null });
     }
 
-    // Enemies: place some on later segments
+    // Enemies
     const enemyCount = clamp(3 + difficulty * 2, 3, 10);
     for (let i = 0; i < enemyCount; i++) {
       const seg = pick(rng, segments.slice(Math.min(1, segments.length-1)));
@@ -562,21 +476,15 @@
     state.popups = [];
 
     state.player = {
-      x: lvl.start.x,
-      y: lvl.start.y,
-      w: 26, h: 30,
+      x: lvl.start.x, y: lvl.start.y, w: 26, h: 30,
       vx: 0, vy: 0,
       onGround: false,
       face: 1,
-
       invulnT: 0,
       speedT: 0,
-      reverseT: 0,
     };
 
-    // Camera reset
-    state.view.x = 0;
-    state.view.y = 0;
+    state.view.x = 0; state.view.y = 0;
   }
 
   function resetRun(newPuzzle) {
@@ -584,31 +492,24 @@
       state.score = 0;
       state.runIndex += 1;
     }
-    const seed = newSeed();
-    buildRun(seed);
+    buildRun(newSeed());
   }
 
-  // ---------- Gameplay steps ----------
+  // ---------- Movement + combat ----------
   function stepPlayer(dt) {
     const p = state.player;
-
-    // Tick powerups
     p.invulnT = Math.max(0, p.invulnT - dt);
     p.speedT  = Math.max(0, p.speedT - dt);
-    p.reverseT = Math.max(0, p.reverseT - dt);
 
     const speed = (p.speedT > 0) ? BASE_MOVE_SPEED * 1.45 : BASE_MOVE_SPEED;
 
-    // Horizontal intent (optionally reversed)
     let want = 0;
     if (input.left) want -= 1;
     if (input.right) want += 1;
-    if (p.reverseT > 0) want *= -1;
 
     p.vx = want * speed;
     if (want !== 0) p.face = want;
 
-    // Jump (edge-trigger)
     if (input.jumpPressed) {
       input.jumpPressed = false;
       if (p.onGround && state.status === "playing") {
@@ -617,19 +518,16 @@
       }
     }
 
-    // Gravity
     p.vy += GRAVITY * dt;
 
-    // Integrate X then resolve
     p.x += p.vx * dt;
     resolveX(p);
 
-    // Integrate Y then resolve
     p.onGround = false;
     p.y += p.vy * dt;
     resolveY(p);
 
-    // Collect coins
+    // Coins
     for (const c of state.coins) {
       if (c.taken) continue;
       if (rectsOverlap(p, c)) {
@@ -638,8 +536,6 @@
         if (!c.isBurst) addPopup(c.x + 8, c.y, "+1", 0.5);
       }
     }
-
-    // Burst coins fade
     for (const c of state.coins) {
       if (!c.isBurst || c.taken) continue;
       c.ttl -= dt;
@@ -661,7 +557,7 @@
       state.message = "Game Over — Enter/↻ to retry";
     }
 
-    // Camera follow (x only)
+    // Camera follow X
     const worldWpx = state.world.wTiles * TILE;
     const viewW = state.view.w;
     state.view.x = clamp(p.x + p.w/2 - viewW/2, 0, Math.max(0, worldWpx - viewW));
@@ -673,7 +569,6 @@
 
     e.vy += GRAVITY * dt;
 
-    // Horizontal
     e.x += e.vx * dt;
     for (const s of state.solids) {
       if (!rectsOverlap(e, s)) continue;
@@ -694,7 +589,6 @@
     }
     if (!hasGroundAhead) e.vx *= -1;
 
-    // Vertical
     e.y += e.vy * dt;
     for (const s of state.solids) {
       if (!rectsOverlap(e, s)) continue;
@@ -720,7 +614,6 @@
       const enemyTop = e.y;
       const falling = p.vy > 0;
 
-      // stomp
       if (falling && (playerBottom - enemyTop) < 18) {
         e.alive = false;
         p.vy = -JUMP_VELOCITY * 0.6;
@@ -728,7 +621,6 @@
         addPopup(e.x + 14, e.y, "+3", 0.7);
       } else {
         if (p.invulnT > 0) {
-          // shield: bounce away
           p.vx = -p.vx * 0.6;
           p.vy = -JUMP_VELOCITY * 0.35;
           addPopup(p.x + 10, p.y - 10, "SHIELD!", 0.5);
@@ -750,10 +642,9 @@
 
   // ---------- Render ----------
   function drawHUD() {
-    // Draw in screen space (not camera space)
     const pad = 12;
 
-    // Text styles
+    // Score + Run (top-left)
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.font = "700 18px ui-monospace, Menlo, Consolas, monospace";
@@ -763,29 +654,32 @@
 
     const s1 = `Score: ${state.score}`;
     const s2 = `Run: ${state.runIndex}`;
-    const s3 = `Author: C Lu & GPT5.2`;
 
-    // small shadow stroke for readability on sky
     ctx.strokeText(s1, pad, pad);
     ctx.fillText(s1, pad, pad);
-
     ctx.strokeText(s2, pad, pad + 22);
     ctx.fillText(s2, pad, pad + 22);
 
-    // Author on top-right
-    ctx.textAlign = "right";
-    ctx.strokeText(s3, state.view.w - pad, pad);
-    ctx.fillText(s3, state.view.w - pad, pad);
+    // Author watermark (middle of screen)
+    const author = "Author: C LU & GPT5.2";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "800 26px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,.18)";
+    ctx.strokeStyle = "rgba(0,0,0,.12)";
+    ctx.lineWidth = 6;
+    ctx.strokeText(author, state.view.w/2, state.view.h/2);
+    ctx.fillText(author, state.view.w/2, state.view.h/2);
 
-    // Powerup indicators
+    // Powerup timers (under score)
     const p = state.player;
     ctx.textAlign = "left";
+    ctx.textBaseline = "top";
     ctx.font = "700 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
     let y = pad + 48;
     const tags = [];
     if (p.speedT > 0) tags.push(`SPEED ${p.speedT.toFixed(1)}s`);
     if (p.invulnT > 0) tags.push(`SHIELD ${p.invulnT.toFixed(1)}s`);
-    if (p.reverseT > 0) tags.push(`REVERSE ${p.reverseT.toFixed(1)}s`);
     if (tags.length) {
       ctx.fillStyle = "rgba(255,255,255,.9)";
       ctx.strokeStyle = "rgba(0,0,0,.35)";
@@ -799,11 +693,11 @@
   }
 
   function draw() {
-    // Sky background
+    // Sky
     ctx.fillStyle = "rgb(92,148,252)";
     ctx.fillRect(0, 0, state.view.w, state.view.h);
 
-    // Camera transform
+    // Camera
     ctx.save();
     ctx.translate(-state.view.x, -state.view.y);
 
@@ -848,14 +742,13 @@
       ctx.fillRect(e.x, e.y, e.w, e.h);
     }
 
-    // Player (green “little man”)
+    // Player
     const p = state.player;
     ctx.fillStyle = (p.invulnT > 0) ? "rgb(180,255,180)" : "rgb(40,200,120)";
     ctx.beginPath();
     ctx.ellipse(p.x + p.w/2, p.y + p.h/2, p.w/2, p.h/2, 0, 0, Math.PI*2);
     ctx.fill();
 
-    // face
     ctx.fillStyle = "#111";
     const ex = (p.face >= 0) ? 1 : -1;
     ctx.beginPath(); ctx.arc(p.x + p.w/2 + ex*5, p.y + p.h/2 - 4, 2.2, 0, Math.PI*2); ctx.fill();
@@ -868,7 +761,7 @@
 
     ctx.restore();
 
-    // Popups (screen space but positioned in world coords -> transform manually)
+    // Popups
     ctx.save();
     ctx.font = "900 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
     ctx.textAlign = "center";
@@ -884,10 +777,10 @@
     }
     ctx.restore();
 
-    // HUD on top (inside game/sky)
+    // HUD
     drawHUD();
 
-    // End screen overlay (drawn on canvas, covers whole canvas)
+    // End screen (full canvas)
     if (state.status !== "playing") {
       ctx.save();
       ctx.fillStyle = "rgba(0,0,0,.35)";
@@ -903,7 +796,7 @@
     }
   }
 
-  // ---------- Main loop ----------
+  // ---------- Loop ----------
   let last = performance.now();
   function loop(now) {
     const dt = clamp((now - last) / 1000, 0, 1/20);
@@ -914,7 +807,6 @@
       stepEnemiesAndCombat(dt);
       stepPopups(dt);
     } else {
-      // still animate popups a bit
       stepPopups(dt);
     }
     draw();
@@ -923,13 +815,8 @@
 
   // ---------- Boot ----------
   resize();
-
-  // First run (do not increment runIndex on initial load)
-  state.seed = newSeed();
-  buildRun(state.seed);
-
+  buildRun(newSeed());
   requestAnimationFrame(loop);
-
 })();
 </script>
 </body>
