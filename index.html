@@ -2,16 +2,31 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>Mini Platformer — Random Solvable Puzzle</title>
+  <!-- Prevent accidental pinch-zoom on mobile (fixes “zoom in and can’t zoom out”) -->
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover" />
+  <title>Mini Platformer</title>
   <style>
-    html, body { height: 100%; margin: 0; overflow: hidden; background: #000; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      width: 100%;
+      overflow: hidden;
+      background: #000;
+      position: fixed; /* helps iOS avoid viewport bounce/scroll */
+      inset: 0;
+      touch-action: none; /* block pinch-zoom & scroll gestures */
+    }
+
+    /* Use dynamic viewport units to better fit mobile landscape/portrait with browser bars */
     canvas {
-      position: fixed; inset: 0;
-      width: 100vw; height: 100vh;
+      position: fixed;
+      left: 0; top: 0;
+      width: 100dvw;
+      height: 100dvh;
       display: block;
-      touch-action: none;
       outline: none;
+      touch-action: none;
     }
 
     /* Full-canvas start overlay */
@@ -71,12 +86,10 @@
     }
     .btn:active { transform: translateY(1px); }
 
-    /* Show on touch devices */
     @media (pointer:coarse) {
       #controls { display:flex; }
     }
-
-    /* Landscape phone: reduce button footprint so you still see play area */
+    /* Landscape phone: smaller buttons to keep more play area visible */
     @media (pointer:coarse) and (orientation: landscape) {
       #controls { padding: 6px 10px calc(10px + env(safe-area-inset-bottom)); }
       .btn { width: 54px; height: 54px; border-radius: 16px; font-size: 16px; }
@@ -115,6 +128,17 @@
 
 <script>
 (() => {
+  // ---------- HARD block pinch/gesture zoom (esp. iOS Safari) ----------
+  // Prevent two-finger pinch from ever zooming the page.
+  document.addEventListener("touchmove", (e) => {
+    if (e.touches && e.touches.length > 1) e.preventDefault();
+  }, { passive: false });
+
+  // iOS Safari gesture events
+  ["gesturestart", "gesturechange", "gestureend"].forEach(evt => {
+    document.addEventListener(evt, (e) => e.preventDefault(), { passive: false });
+  });
+
   // ---------- Helpers ----------
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const rectsOverlap = (a, b) => (
@@ -143,7 +167,7 @@
   const randInt = (rng, a, b) => (a + Math.floor(rng() * (b - a + 1)));
   const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
 
-  // ---------- Canvas (full screen; portrait + landscape) ----------
+  // ---------- Canvas (true full-screen; better in landscape via visualViewport) ----------
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d", { alpha: false });
   const overlay = document.getElementById("overlay");
@@ -156,7 +180,7 @@
     runIndex: 1,
     seed: 0,
     score: 0,
-    status: "playing", // playing | win | lose
+    status: "playing",
     message: "",
     view: { x: 0, y: 0, w: 360, h: 640 },
     world: { wTiles: 140, hTiles: 18, groundY: 16 },
@@ -169,18 +193,24 @@
   };
 
   function resize() {
-    const w = Math.max(1, window.innerWidth);
-    const h = Math.max(1, window.innerHeight);
+    // visualViewport better matches what you can actually see in mobile landscape
+    const vv = window.visualViewport;
+    const w = Math.max(1, vv ? vv.width : window.innerWidth);
+    const h = Math.max(1, vv ? vv.height : window.innerHeight);
+
     const r = dpr();
     canvas.width = Math.floor(w * r);
     canvas.height = Math.floor(h * r);
     canvas.style.width = w + "px";
     canvas.style.height = h + "px";
     ctx.setTransform(r, 0, 0, r, 0, 0);
+
     state.view.w = w;
     state.view.h = h;
   }
+
   window.addEventListener("resize", resize, { passive: true });
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", resize, { passive: true });
 
   // ---------- Input ----------
   const input = { left:false, right:false, jumpPressed:false, jumpHeld:false, anyActivated:false };
@@ -211,7 +241,6 @@
   window.addEventListener("keydown", (e) => onKey(e, true), { passive:false });
   window.addEventListener("keyup", (e) => onKey(e, false), { passive:false });
 
-  // Touch controls
   const hookHold = (el, field) => {
     const down = (e) => { e.preventDefault(); activateControls(); input[field] = true; };
     const up = (e) => { e.preventDefault(); input[field] = false; };
@@ -242,10 +271,8 @@
   const BASE_MOVE_SPEED = 320;
   const JUMP_VELOCITY = 780;
 
-  // Jump reach (physics-based)
   function jumpTimeToDeltaY(dyPx) {
-    const V = JUMP_VELOCITY;
-    const G = GRAVITY;
+    const V = JUMP_VELOCITY, G = GRAVITY;
     if (dyPx >= 0) return (V + Math.sqrt(V*V + 2*G*dyPx)) / G;
     const h = -dyPx;
     const disc = V*V - 2*G*h;
@@ -271,12 +298,10 @@
       body.vx = 0;
     }
   }
-
   function resolveY(body) {
     let hitQ = null;
     for (const s of state.solids) {
       if (!rectsOverlap(body, s)) continue;
-
       if (body.vy > 0) {
         body.y = s.y - body.h;
         body.vy = 0;
@@ -290,7 +315,7 @@
     if (hitQ) onHitQBlock(hitQ);
   }
 
-  // ---------- Funny rewards for '?' blocks ----------
+  // ---------- '?' rewards ----------
   const REWARDS = [
     { id: "coins",      w: 0.40 },
     { id: "superjump",  w: 0.18 },
@@ -304,7 +329,6 @@
     for (const it of items) { r -= it.w; if (r <= 0) return it.id; }
     return items[items.length-1].id;
   }
-
   function onHitQBlock(block) {
     if (block.used) return;
     block.used = true;
@@ -321,7 +345,6 @@
     addPopup(cx, cy - 10, "+5", 0.8);
 
     const p = state.player;
-
     if (reward === "coins") {
       addPopup(cx, cy - 28, "COINS!", 0.9);
       for (let i = 0; i < 3; i++) {
@@ -347,10 +370,9 @@
     }
   }
 
-  // ---------- Solvable generation (critical path first) ----------
+  // ---------- Solvable generation ----------
   function generateSolvableLevel(seed, difficulty) {
     const rng = makeRng(seed);
-
     const wTiles = clamp(95 + difficulty * 18, 95, 160);
     const hTiles = 18;
     const groundY = 16;
@@ -382,7 +404,7 @@
       if (!isPit(x)) solidAt(x, groundY, "ground");
     }
 
-    // Critical path platforms (physics constrained)
+    // Critical path (physics constrained)
     const segments = [];
     let x = 2, y = groundY - 1;
     const endTarget = wTiles - 8;
@@ -423,7 +445,7 @@
     const flag = { x: (flagSeg.x + flagSeg.len - 1)*TILE, y: (flagSeg.y - 1)*TILE, w: TILE, h: TILE };
     solidAt(flagSeg.x + flagSeg.len - 1, flagSeg.y, "ground");
 
-    // Coins (optional)
+    // Coins
     for (const seg of segments) {
       if (rng() < 0.65) {
         const count = randInt(rng, 1, 3);
@@ -550,14 +572,14 @@
       addScore(10);
     }
 
-    // Fall off world
+    // Fall off
     const worldHpx = state.world.hTiles * TILE;
     if (p.y > worldHpx + 600) {
       state.status = "lose";
       state.message = "Game Over — Enter/↻ to retry";
     }
 
-    // Camera follow X
+    // Camera X
     const worldWpx = state.world.wTiles * TILE;
     const viewW = state.view.w;
     state.view.x = clamp(p.x + p.w/2 - viewW/2, 0, Math.max(0, worldWpx - viewW));
@@ -577,7 +599,6 @@
       e.vx *= -1;
     }
 
-    // Ground probe
     const dir = Math.sign(e.vx) || 1;
     const aheadX = e.x + (dir > 0 ? e.w + 1 : -1);
     const footY = e.y + e.h + 2;
@@ -643,11 +664,12 @@
   // ---------- Render ----------
   function drawHUD() {
     const pad = 12;
+    const font = "700 18px ui-monospace, Menlo, Consolas, monospace";
 
     // Score + Run (top-left)
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
-    ctx.font = "700 18px ui-monospace, Menlo, Consolas, monospace";
+    ctx.font = font;
     ctx.fillStyle = "rgba(255,255,255,.95)";
     ctx.strokeStyle = "rgba(0,0,0,.35)";
     ctx.lineWidth = 4;
@@ -660,16 +682,13 @@
     ctx.strokeText(s2, pad, pad + 22);
     ctx.fillText(s2, pad, pad + 22);
 
-    // Author watermark (middle of screen)
-    const author = "Author: C LU & GPT5.2";
+    // Author: C Lu (top-middle, same format)
+    const author = "Author: C Lu";
     ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.font = "800 26px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
-    ctx.fillStyle = "rgba(255,255,255,.18)";
-    ctx.strokeStyle = "rgba(0,0,0,.12)";
-    ctx.lineWidth = 6;
-    ctx.strokeText(author, state.view.w/2, state.view.h/2);
-    ctx.fillText(author, state.view.w/2, state.view.h/2);
+    ctx.textBaseline = "top";
+    ctx.font = font;
+    ctx.strokeText(author, state.view.w / 2, pad);
+    ctx.fillText(author, state.view.w / 2, pad);
 
     // Powerup timers (under score)
     const p = state.player;
@@ -780,7 +799,7 @@
     // HUD
     drawHUD();
 
-    // End screen (full canvas)
+    // End screen
     if (state.status !== "playing") {
       ctx.save();
       ctx.fillStyle = "rgba(0,0,0,.35)";
